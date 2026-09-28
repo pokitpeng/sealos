@@ -207,9 +207,16 @@ func (runtime *ContainerdRuntime) processConfigFile() (string, error) {
 		} `toml:"options"`
 	}
 	type Config struct {
-		Version int    `toml:"version"`
-		Root    string `toml:"root"`
+		Version int      `toml:"version"`
+		Root    string   `toml:"root"`
+		Imports []string `toml:"imports"`
 		Plugins struct {
+			IoContainerdCriV1Runtime struct {
+				Containerd struct {
+					DefaultRuntimeName string             `toml:"default_runtime_name"`
+					Runtimes           map[string]Runtime `toml:"runtimes"`
+				} `toml:"containerd"`
+			} `toml:"io.containerd.cri.v1.runtime"`
 			IoContainerdGrpcV1Cri struct {
 				SandboxImage            string `toml:"sandbox_image"`
 				MaxContainerLogLineSize int    `toml:"max_container_log_line_size"`
@@ -232,15 +239,35 @@ func (runtime *ContainerdRuntime) processConfigFile() (string, error) {
 		if err != nil {
 			return "", err
 		}
-		defaultRuntime := config.Plugins.IoContainerdGrpcV1Cri.Containerd.DefaultRuntimeName
-		containerRuntime, ok := config.Plugins.IoContainerdGrpcV1Cri.Containerd.Runtimes[defaultRuntime]
-		if ok {
-			if containerRuntime.Options.SystemdCgroup {
-				return DefaultSystemdCgroupDriver, nil
-			}
+		if len(config.Imports) != 0 {
+			return "", fmt.Errorf("containerd config imports are not supported for cgroup driver detection: %v", config.Imports)
 		}
+		var defaultRuntime string
+		var runtimes map[string]Runtime
+		switch config.Version {
+		case 3, 4:
+			defaultRuntime = config.Plugins.IoContainerdCriV1Runtime.Containerd.DefaultRuntimeName
+			runtimes = config.Plugins.IoContainerdCriV1Runtime.Containerd.Runtimes
+		case 1, 2:
+			defaultRuntime = config.Plugins.IoContainerdGrpcV1Cri.Containerd.DefaultRuntimeName
+			runtimes = config.Plugins.IoContainerdGrpcV1Cri.Containerd.Runtimes
+		default:
+			return "", fmt.Errorf("unsupported containerd config version %d", config.Version)
+		}
+		if defaultRuntime == "" {
+			// containerd defaults to runc when no default_runtime_name is set.
+			defaultRuntime = "runc"
+		}
+		containerRuntime, ok := runtimes[defaultRuntime]
+		if !ok {
+			return "", fmt.Errorf("containerd config version %d: default runtime %q not found", config.Version, defaultRuntime)
+		}
+		if containerRuntime.Options.SystemdCgroup {
+			return DefaultSystemdCgroupDriver, nil
+		}
+		return DefaultCgroupDriver, nil
 	}
-	return DefaultCgroupDriver, nil
+	return "", fmt.Errorf("containerd config %q not found", runtime.config)
 }
 
 // detectCRISocketImpl is separated out only for test purposes, DON'T call it directly, use DetectCRISocket instead
